@@ -12,6 +12,19 @@ const nextConfig = {
     if (!isServer) {
       config.optimization.minimize = false;
     }
+    
+    // Добавляем поддержку устаревших API Shadow DOM для совместимости
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        "child_process": false,
+        "fs": false,
+        "net": false,
+        "tls": false,
+        "crypto": false,
+      };
+    }
+    
     return config;
   },
   
@@ -24,7 +37,7 @@ const nextConfig = {
   images: {
     domains: ['localhost'],
     dangerouslyAllowSVG: true,
-    contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https: data:; connect-src 'self'; media-src 'self';",
+    contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.com data:; connect-src 'self'; media-src 'self';",
   },
   
   // Headers для лучшей загрузки шрифтов
@@ -44,12 +57,15 @@ const nextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https: data:; connect-src 'self'; media-src 'self';"
+            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.com data:; connect-src 'self'; media-src 'self';"
           },
         ],
       },
     ];
   },
+  
+  // Отключаем React Dev Overlay в production для избежания ошибок с Shadow DOM
+  productionBrowserSourceMaps: false,
 };
 
 module.exports = nextConfig;

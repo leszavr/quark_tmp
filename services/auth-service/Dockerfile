@@ -2,7 +2,8 @@
 # Auth Service - NestJS + TypeORM + PostgreSQL
 FROM node:20-alpine AS base
 WORKDIR /app
-RUN npm install -g pnpm@latest
+# Use corepack to provide pnpm (avoids installing pnpm via npm)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # --- Builder stage ---
 FROM base AS builder
@@ -10,6 +11,9 @@ FROM base AS builder
 # Build argument для registry с fallback на npmjs.org
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
+
+# ВАЖНО: Build context должен быть корнем репозитория!
+# docker build -f services/auth-service/Dockerfile -t quark-auth-service .
 
 # Копируем конфигурацию workspace
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
@@ -43,18 +47,17 @@ COPY --from=builder /app/pnpm-lock.yaml /app/
 COPY --from=builder /app/package.json /app/
 
 # Устанавливаем prod dependencies с кешированием
+WORKDIR /app
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    cd /app && \
-    pnpm install --prod && \
-    cd /app/services/auth-service
+    pnpm install --prod
 
 # Копируем собранное приложение
-COPY --from=builder /app/services/auth-service/dist ./dist
+WORKDIR /app/services/auth-service
+# Создаем пользователя для безопасности до копирования крупных артефактов
+RUN addgroup -g 1001 -S nodejs && adduser -S quark -u 1001
 
-# Создаем пользователя для безопасности
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S quark -u 1001 && \
-    chown -R quark:nodejs /app
+# Копируем собранное приложение и устанавливаем правильного владельца без выполнения дорогостоящего chown -R
+COPY --from=builder --chown=quark:nodejs /app/services/auth-service/dist ./dist
 
 USER quark
 

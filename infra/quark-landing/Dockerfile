@@ -1,11 +1,16 @@
 # Dockerfile для Quark Landing - собирается из pnpm workspace (аналогично blog-service)
 # Не используется! Landing собирается через корневой workspace context
+# ВАЖНО: Build context должен быть корнем репозитория!
+# docker build -f infra/quark-landing/Dockerfile -t quark-landing .
 
 FROM node:22-alpine AS builder
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 
 WORKDIR /workspace
 
-RUN npm install -g pnpm@latest
+# Use corepack to provide pnpm (avoids installing pnpm via npm)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # Копируем workspace конфигурацию
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc* ./
@@ -25,6 +30,9 @@ RUN pnpm build
 
 # Production stage
 FROM node:22-alpine AS runner
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
+
 WORKDIR /app
 
 ENV NODE_ENV=production

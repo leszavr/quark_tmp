@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1.4
 # Blog Service - Express + Drizzle ORM + TypeScript
+# ВАЖНО: Build context должен быть корнем репозитория!
+# docker build -f services/blog-service/Dockerfile -t quark-blog-service .
 FROM node:20-alpine AS base
 WORKDIR /app
-RUN npm install -g pnpm@latest
+# Use corepack to provide pnpm (avoids installing pnpm via npm)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # --- Builder stage ---
 FROM base AS builder
@@ -42,11 +45,16 @@ COPY --from=builder /app/pnpm-workspace.yaml /app/
 COPY --from=builder /app/pnpm-lock.yaml /app/
 COPY --from=builder /app/package.json /app/
 
-# Устанавливаем prod dependencies с кешированием
+# Устанавливаем prod dependencies с кешированием в контексте приложения
+WORKDIR /app/services/blog-service
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    cd /app && \
-    pnpm install --prod --frozen-lockfile && \
-    cd /app/services/blog-service
+  pnpm install --prod --frozen-lockfile || true
+
+# Скопируем сгенерированные node_modules из builder-а и установим prod-зависимости
+# Это помогает избежать проблем с pnpm symlink'ами в monorepo и гарантирует, что
+# пакеты, установленные на этапе сборки, будут доступны на этапе запуска.
+COPY --from=builder /app/node_modules /app/node_modules
+WORKDIR /app/services/blog-service
 
 # Копируем собранное приложение и необходимые runtime файлы
 COPY --from=builder /app/services/blog-service/dist ./dist

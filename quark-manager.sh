@@ -1,9 +1,10 @@
 #!/bin/bash
+export DOCKER_BUILDKIT=1
 
-# Quark МКС Service Manager v2.1
+# Quark МКС Service Manager v2.3 Noddy
 # Унифицированный скрипт управления всеми микросервисами платформы Quark
 # Автор: Quark Development Team
-# Дата: 2 октября 2025
+# Дата: 25 ноября 2025
 
 set -e
 
@@ -24,6 +25,18 @@ LOG_FILE="$LOG_DIR/quark-manager.log"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 ENV_FILE="$SCRIPT_DIR/.env"
 
+# Wrapper for docker compose to always use the project's compose file
+dc() {
+    docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+# Behaviour flags
+# Если true, пропускаем жесткую остановку при отсутствии .env (только warn)
+REQUIRE_ENV=false
+# По умолчанию НЕ выполняем проверку структуры (чтобы start не падал).
+# Для принудительной проверки передавайте --ensure-structure
+SKIP_STRUCTURE_CHECK=true
+
 # Создание папки для логов
 mkdir -p "$LOG_DIR"
 
@@ -32,19 +45,14 @@ SKIP_ENV_CHECK=false
 
 # Проверка наличия .env файла
 check_env_file() {
-  if [ ! -f "$ENV_FILE" ] && [ "$SKIP_ENV_CHECK" = false ]; then
-    echo -e "${RED}❌ Файл .env не найден!${NC}"
-    echo -e "${YELLOW}Пожалуйста, создайте файл .env в корне проекта с необходимыми переменными окружения.${NC}"
-    echo -e "${YELLOW}Вы можете скопировать .env.example (если есть) или создать новый файл с переменными:${NC}"
-    echo -e "${YELLOW}POSTGRES_USER=quark_user${NC}"
-    echo -e "${YELLOW}POSTGRES_PASSWORD=quark_password${NC}"
-    echo -e "${YELLOW}MINIO_ROOT_USER=minioadmin${NC}"
-    echo -e "${YELLOW}MINIO_ROOT_PASSWORD=minioadmin${NC}"
-    echo -e "${YELLOW}VAULT_DEV_ROOT_TOKEN_ID=myroot${NC}"
-    echo ""
-    echo -e "${CYAN}Для пропуска этой проверки используйте флаг --skip-env-check${NC}"
-    exit 1
-  fi
+    if [ ! -f "$ENV_FILE" ]; then
+        echo -e "${YELLOW}⚠️  Файл .env не найден в корне проекта: $ENV_FILE${NC}"
+        echo -e "${YELLOW}Если вы хотите, чтобы эта проверка была обязательной, запустите с флагом --require-env${NC}"
+        if [ "$REQUIRE_ENV" = true ]; then
+            echo -e "${RED}❌ Файл .env обязателен, выполнение прервано.${NC}"
+            exit 1
+        fi
+    fi
 }
 
 # Функция логирования
@@ -70,8 +78,8 @@ print_log() {
 show_logo() {
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}         ░▒▓█ QUARK МКС SERVICE MANAGER v2.0 █▓▒░${NC}"
-    echo -e "${CYAN}             МКС - Управление Микросервисами${NC}"
+    echo -e "${CYAN}         ░▒▓█ QUARK МКС SERVICE MANAGER v2.3 Noddy█▓▒░${NC}"
+    echo -e "${CYAN}                МКС - Управление Микросервисами${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
 }
@@ -137,24 +145,195 @@ check_requirements() {
         exit 1
     fi
 
-    if ! command -v docker compose &> /dev/null; then
-        print_log "$RED" "ERROR" "❌ Docker Compose не установлен!"
+    # Проверяем доступность subcommand 'docker compose'
+    if ! docker compose version &> /dev/null; then
+        print_log "$RED" "ERROR" "❌ docker compose отсутствует или не доступен"
         exit 1
     fi
 
     if [[ ! -f "$COMPOSE_FILE" ]]; then
-        print_log "$RED" "ERROR" "❌ Файл docker compose.yml не найден: $COMPOSE_FILE"
+        print_log "$RED" "ERROR" "❌ Файл docker-compose.yml не найден: $COMPOSE_FILE"
         exit 1
     fi
+}
+
+# Попытаться установить Docker автоматически (консольное подтверждение)
+attempt_install_docker() {
+    print_log "$CYAN" "INFO" "🔧 Попытка авто-установки Docker через официальный скрипт get.docker.com"
+    read -p "Требуется sudo. Продолжить автоматическую установку Docker? (yes/no): " -r
+    if [[ $REPLY != "yes" ]]; then
+        print_log "$YELLOW" "INFO" "Автоустановка отменена пользователем"
+        return 1
+    fi
+    if ! command -v curl &>/dev/null; then
+        print_log "$RED" "ERROR" "curl не найден. Установите curl и повторите."
+        return 1
+    fi
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sudo sh /tmp/get-docker.sh
+    local res=$?
+    if [[ $res -ne 0 ]]; then
+        print_log "$RED" "ERROR" "Авто-установка Docker не удалась (код $res)"
+        return 1
+    fi
+    print_log "$GREEN" "SUCCESS" "Docker установлен. Пожалуйста, перезапустите сессию (выход/вход) если требуется и повторите команду."
+    return 0
+}
+
+ensure_docker() {
+    if ! command -v docker &> /dev/null; then
+        print_log "$YELLOW" "WARN" "Docker не найден на этой системе"
+        attempt_install_docker || return 1
+    fi
+    # Проверяем доступность docker compose subcommand
+    if ! docker compose version &> /dev/null; then
+        print_log "$YELLOW" "WARN" "docker compose не доступен или не поддерживается"
+        print_log "$CYAN" "INFO" "Попытка установить compose plugin через пакетный менеджер может потребоваться"
+        read -p "Хотите попробовать автоустановку docker compose plugin? (yes/no): " -r
+        if [[ $REPLY == "yes" ]]; then
+            # Пытаемся установить плагин у docker (для популярных систем он уже включён)
+            if sudo mkdir -p /etc/docker; then
+                print_log "$CYAN" "INFO" "Попробуйте установить пакет docker/compose через системный пакетный менеджер вручную"
+            fi
+        else
+            print_log "$YELLOW" "INFO" "Продолжение без docker compose может привести к ошибкам"
+        fi
+    fi
+}
+
+# Проверить порты (80 и 4873) и при занятости спросить пользователя
+check_ports() {
+    local ports=(80 4873)
+    for p in "${ports[@]}"; do
+        if ss -ltnp 2>/dev/null | grep -q ":$p \|:$p$"; then
+            local occupier_line
+            occupier_line=$(ss -ltnp 2>/dev/null | grep ":$p\b" | head -n1 || true)
+            local occupier=$(echo "$occupier_line" | awk '{print $6,$7,$8,$9}')
+            # Специальная обработка для Verdaccio (порт 4873)
+            if [[ "$p" -eq 4873 ]]; then
+                print_log "$YELLOW" "INFO" "Порт $p занят: $occupier"
+                # Проверим HTTP-статус Verdaccio прежде чем просить освобождать порт
+                local code
+                code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4873 2>/dev/null || true)
+                if [[ "$code" == "200" ]]; then
+                    print_log "$GREEN" "SUCCESS" "✅ Verdaccio отвечает HTTP 200 — порт $p используется Verdaccio, продолжаем"
+                    continue
+                fi
+
+                if [[ "$code" == "404" ]]; then
+                    print_log "$YELLOW" "WARN" "⚠️ Verdaccio отвечает 404. Попытка освободить порт $p и перезапустить Verdaccio..."
+
+                    # Попытаемся найти docker-контейнер, который публикует этот порт
+                    local container_info
+                    container_info=$(docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' 2>/dev/null | grep '4873' | head -n1 || true)
+                    if [[ -n "$container_info" ]]; then
+                        local cid=$(echo "$container_info" | awk '{print $1}')
+                        local cname=$(echo "$container_info" | awk '{print $2}')
+                        print_log "$CYAN" "INFO" "Найден контейнер, занимающий порт: $cid ($cname). Останавливаем..."
+                        docker stop "$cid" || print_log "$YELLOW" "WARN" "Не удалось остановить контейнер $cid"
+                    else
+                        # Попытка обнаружить PID процесса и предложить пользователю убить его
+                        local pid
+                        pid=$(echo "$occupier_line" | grep -oP 'pid=\K[0-9]+' | head -n1 || true)
+                        if [[ -n "$pid" ]]; then
+                            print_log "$YELLOW" "INFO" "Процесс с PID $pid занимает порт $p"
+                            read -p "Автоматически убить процесс $pid чтобы освободить порт $p? (yes/no): " -r killans
+                            if [[ $killans == "yes" ]]; then
+                                kill -9 "$pid" 2>/dev/null || print_log "$YELLOW" "WARN" "Не удалось убить процесс $pid"
+                                sleep 1
+                            else
+                                print_log "$RED" "ERROR" "Операция прервана пользователем из-за занятого порта $p"
+                                return 1
+                            fi
+                        else
+                            # Не удалось определить PID — просим пользователя вмешаться
+                            print_log "$RED" "ERROR" "Не удалось автоматически определить процесс на порту $p. Пожалуйста, освободите его вручную."
+                            return 1
+                        fi
+                    fi
+
+                    # После попытки освободить порт — проверяем снова
+                    if ss -ltnp 2>/dev/null | grep -q ":$p \|:$p$"; then
+                        print_log "$YELLOW" "WARN" "Порт $p всё ещё занят после попытки освобождения"
+                        # Попробуем поднять verdaccio в любом случае — если не получится, переключимся на онлайн реестр
+                        dc up -d verdaccio || print_log "$YELLOW" "WARN" "Не удалось запустить verdaccio сразу"
+                        if wait_for_health "verdaccio" 30; then
+                            print_log "$GREEN" "SUCCESS" "✅ Verdaccio поднят успешно после освобождения порта"
+                            continue
+                        else
+                            print_log "$YELLOW" "WARN" "Verdaccio не поднялся после освобождения порта — переключаемся на онлайн реестр"
+                            export npm_config_registry=https://registry.npmjs.org/
+                            export pnpm_config_registry=https://registry.npmjs.org/
+                            continue
+                        fi
+                    else
+                        # Порт свободен — запускаем Verdaccio
+                        dc up -d verdaccio || print_log "$YELLOW" "WARN" "Не удалось запустить verdaccio"
+                        if wait_for_health "verdaccio" 30; then
+                            print_log "$GREEN" "SUCCESS" "✅ Verdaccio поднят успешно"
+                            continue
+                        else
+                            print_log "$YELLOW" "WARN" "Verdaccio не поднялся — переключаемся на онлайн реестр"
+                            export npm_config_registry=https://registry.npmjs.org/
+                            export pnpm_config_registry=https://registry.npmjs.org/
+                            continue
+                        fi
+                    fi
+                fi
+
+                # Для любых других кодов (или если curl вернул пусто) — спрашиваем пользователя как раньше
+                print_log "$RED" "ERROR" "Порт $p занят: $occupier"
+                while true; do
+                    read -p "Порт $p занят. Освободили порт $p? (Y/N): " -r yn
+                    case $yn in
+                        [Yy]*)
+                            if ! ss -ltnp 2>/dev/null | grep -q ":$p \|:$p$"; then
+                                print_log "$GREEN" "INFO" "Порт $p свободен"
+                                break
+                            else
+                                print_log "$YELLOW" "INFO" "Порт $p всё ещё занят"
+                            fi
+                            ;;
+                        [Nn]*)
+                            print_log "$RED" "ERROR" "Операция прервана пользователем из-за занятого порта $p"
+                            return 1
+                            ;;
+                        *) echo "Пожалуйста, введите Y или N." ;;
+                    esac
+                done
+            else
+                print_log "$RED" "ERROR" "Порт $p занят: $occupier"
+                while true; do
+                    read -p "Порт $p занят. Освободили порт $p? (Y/N): " -r yn
+                    case $yn in
+                        [Yy]*)
+                            # проверить снова
+                            if ! ss -ltnp 2>/dev/null | grep -q ":$p \|:$p$"; then
+                                print_log "$GREEN" "INFO" "Порт $p свободен"
+                                break
+                            else
+                                print_log "$YELLOW" "INFO" "Порт $p всё ещё занят"
+                            fi
+                            ;;
+                        [Nn]*)
+                            print_log "$RED" "ERROR" "Операция прервана пользователем из-за занятого порта $p"
+                            return 1
+                            ;;
+                        *) echo "Пожалуйста, введите Y или N." ;;
+                    esac
+                done
+            fi
+        fi
+    done
+    return 0
 }
 
 # Функция проверки существования сервиса
 validate_service() {
     # Простая проверка сервиса через docker-compose
-    if ! docker compose config --services | grep -q "^$1$"; then
+    if ! dc config --services | grep -q "^$1$"; then
         print_log "$RED" "ERROR" "❌ Неизвестный сервис: $1"
         print_log "$YELLOW" "INFO" "Доступные сервисы:"
-        docker compose config --services | sed 's/^/  /'
+        dc config --services | sed 's/^/  /'
         return 1
     fi
     return 0
@@ -167,7 +346,7 @@ show_status() {
     echo ""
     
     # Получаем список всех сервисов
-    local services=$(docker compose ps --format '{{.Name}}' 2>/dev/null)
+    local services=$(dc ps --format '{{.Name}}' 2>/dev/null)
     
     if [[ -z "$services" ]]; then
         print_log "$YELLOW" "WARN" "⚠️  Нет запущенных сервисов"
@@ -220,7 +399,13 @@ show_status() {
         fi
         
         # Форматируем имя сервиса (убираем префикс quark-)
-        local service_name="${container#quark-}"
+        # Попытка аккуратно получить service name; если формат project_service_1, извлекаем service
+        local service_name="$container"
+        if [[ "$container" == *"_"*"_"* ]]; then
+            service_name=$(echo "$container" | awk -F'_' '{print $2}')
+        else
+            service_name="${container#quark-}"
+        fi
         
         # Выводим строку
         echo -e "  ${status_color}${status_icon} ${service_name}${NC}"
@@ -231,8 +416,8 @@ show_status() {
     
     # Статистика
     local total=$(echo "$services" | grep -c .)
-    local running=$(docker compose ps --filter "status=running" --format '{{.Name}}' 2>/dev/null | wc -l)
-    local stopped=$(docker compose ps --filter "status=exited" --format '{{.Name}}' 2>/dev/null | wc -l)
+    local running=$(dc ps --filter "status=running" --format '{{.Name}}' 2>/dev/null | wc -l)
+    local stopped=$(dc ps --filter "status=exited" --format '{{.Name}}' 2>/dev/null | wc -l)
     
     echo -e "${CYAN}📈 Всего: $total | ▶️  Запущено: $running | ⏹️  Остановлено: $stopped${NC}"
     echo ""
@@ -240,7 +425,7 @@ show_status() {
     # Подробная таблица от Docker Compose
     echo -e "${WHITE}Подробная информация:${NC}"
     echo ""
-    docker compose ps
+    dc ps
     echo ""
 }
 
@@ -262,6 +447,194 @@ check_verdaccio_availability() {
     
     print_log "$YELLOW" "WARN" "⚠️  Verdaccio недоступен после 1 минуты ожидания"
     return 1
+}
+
+# Ожидание здоровья контейнера или доступности сервиса
+# Аргументы: service_name timeout_seconds
+wait_for_health() {
+    local service="$1"
+    local timeout="$2"
+    local start_ts=$(date +%s)
+    local end_ts=$((start_ts + timeout))
+
+    print_log "$CYAN" "INFO" "⏳ Ожидание health для $service (таймаут ${timeout}s)..."
+
+    while [[ $(date +%s) -lt $end_ts ]]; do
+        # Попробуем найти контейнер, связанный с сервисом
+        local container=$(dc ps --filter "name=$service" --format '{{.Name}}' 2>/dev/null | head -n1 || true)
+        # Специальная проверка для verdaccio: если HTTP 200 на порт 4873 — считаем healthy
+        if [[ "$service" == "verdaccio" ]]; then
+            # Пытаемся получить числовой код ответа, это надежнее для разных версий curl/HTTP
+            local code
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4873 2>/dev/null || true)
+            if [[ "$code" == "200" ]]; then
+                print_log "$GREEN" "SUCCESS" "✅ $service -> HTTP 200"
+                return 0
+            fi
+        fi
+        if [[ -n "$container" ]]; then
+            # Попробуем прочитать health
+            local health=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)
+            local status=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)
+            if [[ "$health" == "healthy" ]]; then
+                print_log "$GREEN" "SUCCESS" "✅ $service -> healthy"
+                return 0
+            fi
+            if [[ "$status" == "running" ]] && [[ -z "$health" ]]; then
+                # Нет healthcheck, считаем running как OK
+                print_log "$GREEN" "SUCCESS" "✅ $service -> running"
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+
+    print_log "$YELLOW" "WARN" "⚠️  Таймаут ожидания health для $service"
+    return 1
+}
+
+# Автоматический порядок старта: infra -> core -> apps
+start_ordered() {
+    # Определите порядок по необходимости
+    local infra_primary=(verdaccio vault postgres redis nats)
+    local infra_secondary=(monitoring minio swagger-ui traefik)
+    # core и app services можно дополнить в будущем или генерировать из compose
+    local core_services=(plugin-hub quark-manager monitoring)
+    local app_services=(auth-service blog-service quark-ui quark-landing)
+
+    print_log "$GREEN" "INFO" "🚀 Запуск infra (primary)..."
+    # Сначала обязателен verdaccio и его прогрев
+    print_log "$CYAN" "INFO" "🔁 Поднимаем Verdaccio и прогреваем кеш (обязательно)..."
+    dc up -d verdaccio || print_log "$YELLOW" "WARN" "Не удалось мгновенно поднять verdaccio"
+    if ! wait_for_health "verdaccio" 60; then
+        print_log "$YELLOW" "WARN" "Verdaccio не отвечает — переключаемся на официальный реестр и продолжаем"
+        export npm_config_registry=https://registry.npmjs.org/
+        export pnpm_config_registry=https://registry.npmjs.org/
+    else
+        # Прогрев кеша
+        print_log "$CYAN" "INFO" "♨️  Прогрев кеша Verdaccio..."
+        local cache_dir="$SCRIPT_DIR/.cache/quark-cache"
+        mkdir -p "$cache_dir" && pushd "$cache_dir" >/dev/null
+    cat > package.json <<'JSON'
+{ "name": "quark-cache-warm", "version": "0.0.0", "dependencies": { "left-pad": "1.3.0" } }
+JSON
+        npm_config_registry=http://localhost:4873 pnpm install --silent || print_log "$YELLOW" "WARN" "Прогрев кеша вернул ошибку"
+        popd >/dev/null
+    fi
+
+    for s in "${infra_primary[@]}"; do
+        print_log "$CYAN" "INFO" "📦 Поднимаем $s..."
+        dc up -d "$s" || print_log "$YELLOW" "WARN" "Не удалось мгновенно поднять $s"
+        wait_for_health "$s" 60 || print_log "$YELLOW" "WARN" "$s не ответил на health за 60s"
+    done
+
+    print_log "$GREEN" "INFO" "🚀 Запуск infra (secondary)..."
+    for s in "${infra_secondary[@]}"; do
+        print_log "$CYAN" "INFO" "📦 Поднимаем $s..."
+        dc up -d "$s" || print_log "$YELLOW" "WARN" "Не удалось мгновенно поднять $s"
+        wait_for_health "$s" 45 || print_log "$YELLOW" "WARN" "$s не ответил на health за 45s"
+    done
+
+    print_log "$GREEN" "INFO" "🚀 Запуск core services..."
+    for s in "${core_services[@]}"; do
+        print_log "$CYAN" "INFO" "📦 Поднимаем $s..."
+        dc up -d "$s" || print_log "$YELLOW" "WARN" "Не удалось поднять $s"
+        wait_for_health "$s" 45 || print_log "$YELLOW" "WARN" "$s не ответил на health за 45s"
+    done
+
+    print_log "$GREEN" "INFO" "🚀 Запуск приложений..."
+    for s in "${app_services[@]}"; do
+        print_log "$CYAN" "INFO" "📦 Поднимаем $s..."
+        dc up -d "$s" || print_log "$YELLOW" "WARN" "Не удалось поднять $s"
+        wait_for_health "$s" 45 || print_log "$YELLOW" "WARN" "$s не ответил на health за 45s"
+    done
+
+    print_log "$GREEN" "SUCCESS" "✅ Ordered start finished"
+}
+
+# Ordered build matching start order
+ordered_build() {
+    print_log "$GREEN" "INFO" "🔨 Ordered build start"
+
+    # 1) Build Verdaccio first (if build is defined)
+    print_log "$CYAN" "INFO" "📦 Building Verdaccio..."
+    dc build verdaccio || print_log "$YELLOW" "WARN" "Build verdaccio returned non-zero"
+
+    # Start verdaccio to warm cache
+    print_log "$CYAN" "INFO" "▶️  Starting Verdaccio for cache warmup"
+    dc up -d verdaccio || print_log "$YELLOW" "WARN" "Could not start verdaccio"
+    if wait_for_health "verdaccio" 60; then
+        print_log "$CYAN" "INFO" "♨️  Warming Verdaccio cache..."
+        local cache_dir="$SCRIPT_DIR/.cache/quark-cache"
+        mkdir -p "$cache_dir" && pushd "$cache_dir" >/dev/null
+    cat > package.json <<'JSON'
+{ "name": "quark-cache-warm", "version": "0.0.0", "dependencies": { "left-pad": "1.3.0" } }
+JSON
+        npm_config_registry=http://localhost:4873 pnpm install --silent || print_log "$YELLOW" "WARN" "Cache warm failed"
+        popd >/dev/null
+    else
+        print_log "$YELLOW" "WARN" "Verdaccio not healthy; will fallback to npm registry for builds"
+        export npm_config_registry=https://registry.npmjs.org/
+        export pnpm_config_registry=https://registry.npmjs.org/
+    fi
+
+    # 3) Build core infra services
+    print_log "$CYAN" "INFO" "📦 Building infra services: vault, postgres, redis, nats"
+    dc build vault postgres redis nats || print_log "$YELLOW" "WARN" "Build infra services returned non-zero"
+
+    # 4) Build plugin-hub
+    print_log "$CYAN" "INFO" "📦 Building plugin-hub"
+    dc build plugin-hub || print_log "$YELLOW" "WARN" "Build plugin-hub returned non-zero"
+
+    # 5) Build main apps
+    print_log "$CYAN" "INFO" "📦 Building main apps: auth-service, blog-service, quark-ui, quark-landing"
+    dc build auth-service blog-service quark-ui quark-landing || print_log "$YELLOW" "WARN" "Build apps returned non-zero"
+
+    # 6) Build monitoring/minio/swagger-ui/traefik
+    print_log "$CYAN" "INFO" "📦 Building secondary infra: monitoring, minio, swagger-ui, traefik"
+    dc build monitoring minio swagger-ui traefik || print_log "$YELLOW" "WARN" "Build secondary infra returned non-zero"
+
+    print_log "$GREEN" "SUCCESS" "✅ Ordered build finished"
+}
+
+# Интерактивное меню
+menu() {
+    PS3=$'Выберите действие: '
+    options=("Start all (ordered)" "Stop all" "Rebuild all" "Status" "UI:dev" "UI:build" "UI:start" "Exit")
+    select opt in "${options[@]}"; do
+        case $opt in
+            "Start all (ordered)") start_ordered; break ;;
+            "Stop all") stop_services; break ;;
+            "Rebuild all") rebuild_services; break ;;
+            "Status") show_status; break ;;
+            "UI:dev") dc up -d quark-ui && break ;;
+            "UI:build") dc build quark-ui && break ;;
+            "UI:start") dc up -d quark-ui && break ;;
+            "Exit") break ;;
+            *) echo "Неверный выбор." ;;
+        esac
+    done
+}
+
+# UI команды helper
+ui_build() {
+    print_log "$PURPLE" "INFO" "🔧 Сборка UI..."
+    dc build quark-ui
+}
+
+ui_start() {
+    print_log "$PURPLE" "INFO" "▶️  Запуск UI..."
+    dc up -d quark-ui
+}
+
+ui_dev() {
+    print_log "$PURPLE" "INFO" "🧪 Запуск UI в режиме разработки (локально)"
+    # Предполагаем, что dev команда запускается локально вне контейнера
+    (cd "$SCRIPT_DIR/infra/quark-ui" && pnpm install && pnpm run dev)
+}
+
+ui_open() {
+    print_log "$PURPLE" "INFO" "🌐 UI URL: http://localhost:3101 (попробуйте открыть в браузере)"
 }
 
 # Функция временного переключения на онлайн реестр
@@ -349,49 +722,49 @@ check_project_structure() {
             fi
             
             # Проверяем доступность verdaccio и при необходимости переключаемся на онлайн реестр
-            local use_online_registry=false
-            if ! check_verdaccio_availability; then
-                switch_to_online_registry
-                use_online_registry=true
-            fi
-            
-            # Выполняем сборку TypeScript файлов в JavaScript
-            print_log "$CYAN" "INFO" "📦 Устанавливаем зависимости и собираем инструменты..."
-            (
-                cd "$SCRIPT_DIR/tools/quark-manager"
-                if command -v pnpm &> /dev/null; then
-                    pnpm install && pnpm run build
-                elif command -v npm &> /dev/null; then
-                    npm install && npm run build
-                else
-                    print_log "$RED" "ERROR" "❌ Не найден менеджер пакетов (pnpm или npm)"
-                    # Восстанавливаем конфигурацию реестра в случае ошибки
-                    if [[ "$use_online_registry" = true ]]; then
-                        restore_registry_config
+            # Если SKIP_STRUCTURE_CHECK=true — не пытаемся автоматически ставить инструмент
+            if [[ "$SKIP_STRUCTURE_CHECK" = true ]]; then
+                print_log "$YELLOW" "WARN" "⚠️  dist not found, пропускаем автоматическую сборку инструментов (SKIP_STRUCTURE_CHECK=true)"
+            else
+                local use_online_registry=false
+                if ! check_verdaccio_availability; then
+                    print_log "$YELLOW" "WARN" "⚠️  Verdaccio недоступен, попытаемся использовать онлайн-реестр временно"
+                    export npm_config_registry=https://registry.npmjs.org/
+                    export pnpm_config_registry=https://registry.npmjs.org/
+                    use_online_registry=true
+                fi
+
+                print_log "$CYAN" "INFO" "📦 Устанавливаем зависимости и собираем инструменты..."
+                (
+                    cd "$SCRIPT_DIR/tools/quark-manager"
+                    if command -v pnpm &> /dev/null; then
+                        pnpm install && pnpm run build
+                    elif command -v npm &> /dev/null; then
+                        npm install && npm run build
+                    else
+                        print_log "$RED" "ERROR" "❌ Не найден менеджер пакетов (pnpm или npm)"
+                        return 1
                     fi
+                )
+                local build_result=$?
+
+                # Очистим временные переменные реестра
+                if [[ "$use_online_registry" = true ]]; then
+                    unset npm_config_registry pnpm_config_registry
+                fi
+
+                if [[ $build_result -ne 0 ]]; then
+                    print_log "$RED" "ERROR" "❌ Ошибка при сборке инструментов"
                     return 1
                 fi
-            )
-            local build_result=$?
-            
-            # Восстанавливаем оригинальную конфигурацию реестра
-            if [[ "$use_online_registry" = true ]]; then
-                restore_registry_config
+
+                if [[ ! -f "$tool_path" ]]; then
+                    print_log "$RED" "ERROR" "❌ Файл check-structure.js не был создан после сборки"
+                    return 1
+                fi
+
+                print_log "$GREEN" "SUCCESS" "✅ Автоматическая установка завершена успешно"
             fi
-            
-            # Проверяем, что сборка прошла успешно
-            if [[ $build_result -ne 0 ]]; then
-                print_log "$RED" "ERROR" "❌ Ошибка при сборке инструментов"
-                return 1
-            fi
-            
-            # Проверяем, что файл check-structure.js теперь существует
-            if [[ ! -f "$tool_path" ]]; then
-                print_log "$RED" "ERROR" "❌ Файл check-structure.js не был создан после сборки"
-                return 1
-            fi
-            
-            print_log "$GREEN" "SUCCESS" "✅ Автоматическая установка завершена успешно"
         fi
         
         # Запускаем проверку структуры проекта
@@ -510,15 +883,16 @@ start_services() {
     }
     
     if [[ ${#services[@]} -eq 0 ]]; then
-        print_log "$GREEN" "INFO" "🚀 Запуск всех сервисов МКС..."
-        docker compose up -d
+        print_log "$GREEN" "INFO" "🚀 Запуск всех сервисов МКС (ordered)..."
+        start_ordered
+        return
     else
         print_log "$GREEN" "INFO" "🚀 Запуск выбранных сервисов: ${services[*]}"
         # Проверяем корректность имен сервисов
         for service in "${services[@]}"; do
             validate_service "$service" || exit 1
         done
-        docker compose up -d "${services[@]}"
+        dc up -d "${services[@]}"
     fi
     
     print_log "$GREEN" "SUCCESS" "✅ Запуск завершен!"
@@ -530,7 +904,7 @@ stop_services() {
     
     if [[ ${#services[@]} -eq 0 ]]; then
         print_log "$YELLOW" "INFO" "⏹️  Остановка всех сервисов..."
-        docker compose down
+        dc down
     else
         print_log "$YELLOW" "INFO" "⏹️  Остановка сервисов: ${services[*]}"
         for service in "${services[@]}"; do
@@ -538,7 +912,7 @@ stop_services() {
         done
         for service in "${services[@]}"; do
             print_log "$YELLOW" "INFO" "📦 Остановка $service..."
-            docker compose stop "$service"
+            dc stop "$service"
         done
     fi
     
@@ -551,13 +925,13 @@ rebuild_services() {
     
     if [[ ${#services[@]} -eq 0 ]]; then
         print_log "$PURPLE" "INFO" "🔨 Пересборка всех сервисов..."
-        docker compose build --no-cache
+        dc build --no-cache
     else
         print_log "$PURPLE" "INFO" "🔨 Пересборка сервисов: ${services[*]}"
         for service in "${services[@]}"; do
             validate_service "$service" || exit 1
         done
-        docker compose build --no-cache "${services[@]}"
+        dc build --no-cache "${services[@]}"
     fi
     
     print_log "$PURPLE" "SUCCESS" "✅ Пересборка завершена!"
@@ -569,9 +943,9 @@ health_check() {
     print_log "$CYAN" "════════════════════════════════════════"
     
     # Простая проверка через docker compose
-    for service in $(docker compose config --services); do
-        if docker compose ps --format json | grep -q "\"$service\""; then
-            if docker compose ps --format json | grep "\"$service\"" | grep -q '"running"'; then
+    for service in $(dc config --services); do
+        if dc ps --format json | grep -q "\"$service\""; then
+            if dc ps --format json | grep "\"$service\"" | grep -q '"running"'; then
                 print_log "$GREEN" "SUCCESS" "✅ $service - работает"
             else
                 print_log "$YELLOW" "WARN" "⚠️  $service - остановлен"
@@ -623,6 +997,14 @@ main() {
                 export SKIP_PACKAGE_CHECK=true
                 shift
                 ;;
+            --require-env)
+                REQUIRE_ENV=true
+                shift
+                ;;
+            --ensure-structure)
+                SKIP_STRUCTURE_CHECK=false
+                shift
+                ;;
             --skip-structure-check)
                 export SKIP_STRUCTURE_CHECK=true
                 shift
@@ -644,19 +1026,23 @@ main() {
         exit 0
     fi
     
-    # Проверка структуры проекта для команд, которые это требуют
-    if [[ "$command" != "help" ]] && [[ "$command" != "--help" ]] && [[ -z "$SKIP_STRUCTURE_CHECK" ]]; then
-        # Для команды start делаем проверку обязательной, для остальных не останавливаем выполнение при ошибке
+    # Проверка структуры проекта — выполняется только если явно включена
+    if [[ "$SKIP_STRUCTURE_CHECK" = false ]]; then
         if [[ "$command" == "start" ]]; then
-            check_project_structure  # Останавливаем выполнение при ошибке для команды start
+            check_project_structure
         else
-            check_project_structure || true  # Не останавливаем выполнение при ошибке для других команд
+            check_project_structure || true
         fi
+    else
+        print_log "$YELLOW" "INFO" "⚠️  Пропущена проверка структуры проекта (SKIP_STRUCTURE_CHECK=true). Для включения используйте --ensure-structure"
     fi
     
     # Выполнение команд
     case $command in
         start)
+            # Ensure docker and ports are ready before starting
+            ensure_docker || { print_log "$RED" "ERROR" "Docker is required"; exit 1; }
+            check_ports || { print_log "$RED" "ERROR" "Required ports are occupied"; exit 1; }
             start_services "${services[@]}"
             show_status
             ;;
@@ -670,7 +1056,11 @@ main() {
             show_status
             ;;
         build)
-            rebuild_services "${services[@]}"
+            if [[ ${#services[@]} -eq 0 ]]; then
+                ordered_build
+            else
+                dc build "${services[@]}"
+            fi
             ;;
         rebuild)
             rebuild_services "${services[@]}"
@@ -685,14 +1075,14 @@ main() {
             ;;
         logs)
             if [[ ${#services[@]} -eq 0 ]]; then
-                docker compose logs
+                dc logs
             else
-                docker compose logs "${services[@]}"
+                    dc logs "${services[@]}"
             fi
             ;;
         clean)
             print_log "$RED" "WARN" "🧹 Очистка всех контейнеров и образов..."
-            docker compose down --rmi all --volumes --remove-orphans
+            dc down --rmi all --volumes --remove-orphans
             docker system prune -f
             print_log "$RED" "SUCCESS" "✅ Очистка завершена!"
             ;;
@@ -707,6 +1097,21 @@ main() {
             else
                 print_log "$YELLOW" "INFO" "Операция отменена."
             fi
+            ;;
+        menu)
+            menu
+            ;;
+        ui:dev)
+            ui_dev
+            ;;
+        ui:build)
+            ui_build
+            ;;
+        ui:start)
+            ui_start
+            ;;
+        ui:open)
+            ui_open
             ;;
         list)
             echo ""

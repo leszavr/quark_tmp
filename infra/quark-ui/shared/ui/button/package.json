@@ -1,5 +1,6 @@
 {
   "name": "@quark-ui/button",
+  "version": "0.1.0",
   "main": "./Button.tsx",
   "exports": {
     ".": "./Button.tsx"

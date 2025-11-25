@@ -2,10 +2,14 @@
 # Quark UI - Next.js 13 + React 18 + TypeScript
 FROM node:20-alpine AS base
 WORKDIR /app
-RUN npm install -g pnpm@latest
+# Use corepack to provide pnpm (avoids installing pnpm via npm)
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # --- Builder stage ---
 FROM base AS builder
+
+# ВАЖНО: Build context должен быть корнем репозитория!
+# docker build -f infra/quark-ui/Dockerfile -t quark-ui .
 
 # Build argument для registry с fallback на npmjs.org
 ARG NPM_REGISTRY=https://registry.npmjs.org
@@ -43,14 +47,16 @@ COPY --from=builder /app/pnpm-lock.yaml /app/
 COPY --from=builder /app/package.json /app/
 
 # Устанавливаем prod dependencies с кешированием
+WORKDIR /app
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
-    cd /app && \
-    pnpm install --prod --frozen-lockfile && \
-    cd /app/infra/quark-ui
+    pnpm install --prod --frozen-lockfile
 
-# Копируем собранное Next.js приложение
-COPY --from=builder /app/infra/quark-ui/.next ./.next
-COPY --from=builder /app/infra/quark-ui/public ./public
+# Копируем собранное Next.js приложение в абсолютный путь package
+COPY --from=builder /app/infra/quark-ui/.next /app/infra/quark-ui/.next
+COPY --from=builder /app/infra/quark-ui/public /app/infra/quark-ui/public
+
+# Ensure runtime commands run in the package folder so `pnpm start` finds package.json
+WORKDIR /app/infra/quark-ui
 
 # Открываем порт
 EXPOSE 3101
@@ -59,5 +65,5 @@ EXPOSE 3101
 ENV PORT=3101
 ENV NODE_ENV=production
 
-# Запускаем Next.js
-CMD ["pnpm", "start"]
+# Запускаем Next.js напрямую чтобы избежать добавления pnpm флагов (например --filter)
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-p", "3101"]

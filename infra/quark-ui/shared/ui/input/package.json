@@ -1,5 +1,6 @@
 {
   "name": "@quark-ui/input",
+  "version": "0.1.0",
   "main": "./Input.tsx",
   "exports": {
     ".": "./Input.tsx"

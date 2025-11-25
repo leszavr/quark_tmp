@@ -1,5 +1,6 @@
 {
   "name": "@quark-ui/card",
+  "version": "0.1.0",
   "main": "./Card.tsx",
   "exports": {
     ".": "./Card.tsx"

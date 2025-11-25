@@ -132,7 +132,9 @@ services:
 
   # Plugin Hub - центральный узел управления модулями
   plugin-hub:
-    build: ./infra/plugin-hub
+    build:
+      context: .
+      dockerfile: infra/plugin-hub/Dockerfile
     container_name: quark-plugin-hub
     environment:
       - NODE_ENV=development
@@ -269,6 +271,9 @@ services:
 
   # Quark Platform UI - модульный административный интерфейс
   quark-ui:
+    build:
+      context: .
+      dockerfile: infra/quark-ui/Dockerfile
     image: quark-quark-ui:latest
     container_name: quark-ui
     environment:
@@ -311,7 +316,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3004
-      - DATABASE_URL=postgresql://quark:quarkpass@postgres:5432/quark_dev
+      - DATABASE_URL=postgresql://quark:${POSTGRES_PASSWORD}@postgres:5432/quark_dev
       - AUTH_SERVICE_URL=http://auth-service:3001
       - PLUGIN_HUB_URL=http://plugin-hub:3000
       - NATS_URL=nats://nats:4222

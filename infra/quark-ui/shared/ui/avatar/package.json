@@ -1,5 +1,6 @@
 {
   "name": "@quark-ui/avatar",
+  "version": "0.1.0",
   "main": "./Avatar.tsx",
   "exports": {
     ".": "./Avatar.tsx"
