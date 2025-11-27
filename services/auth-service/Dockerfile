@@ -33,9 +33,9 @@ RUN pnpm run build
 # --- Production stage ---
 FROM base AS production
 WORKDIR /app/services/auth-service
-
 # Build argument для registry (повторно объявляем для production stage)
-ARG NPM_REGISTRY=https://registry.npmjs.org
+# По умолчанию используем внутренний Verdaccio (переопределяемый при сборке)
+ARG NPM_REGISTRY=http://verdaccio:4873
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 
 # Копируем package.json
