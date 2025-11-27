@@ -283,10 +283,9 @@ services:
       - VITE_MONITORING_URL=http://monitoring:3900
     ports:
       - "3101:3101"
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.quark-ui.rule=Host(`admin.quark.local`) || Host(`localhost`)"
-      - "traefik.http.services.quark-ui.loadbalancer.server.port=3101"
+    # Traefik labels removed to disable proxying on port 80; UI will be
+    # available directly on host:3101. For future routing via Traefik,
+    # add appropriate labels (host/path rules) and remove this port mapping.
     depends_on:
       auth-service:
         condition: service_healthy
